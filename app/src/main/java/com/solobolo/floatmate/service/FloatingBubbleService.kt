@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.*
 import android.widget.FrameLayout
@@ -36,7 +37,7 @@ class FloatingBubbleService : Service() {
         const val CHANNEL_ID = "floatmate_service"
         var isRunning = false
             private set
-        private const val TAG = "zebugger"
+        private const val TAG = "FloatMateDrag"
     }
 
     @Inject
@@ -57,27 +58,28 @@ class FloatingBubbleService : Service() {
     private var initialTouchX = 0f
     private var initialTouchY = 0f
     private var lastActionDownTime = 0L
+    private var isDragging = false
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Service onCreate() called")
+        Log.d(TAG, "=== SERVICE ONCREATE CALLED ===")
         isRunning = true
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
-        Log.d(TAG, "Foreground notification started")
 
         overlayLifecycleOwner.onCreate()
+        Log.d(TAG, "Service setup complete")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand() received")
+        Log.d(TAG, "=== ON START COMMAND ===")
         if (bubbleView == null) {
-            Log.d(TAG, "bubbleView is null, creating bubble view")
+            Log.d(TAG, "Creating new bubble view")
             createBubbleView()
         } else {
-            Log.d(TAG, "bubbleView already exists")
+            Log.d(TAG, "Bubble view already exists")
         }
         overlayLifecycleOwner.onStart()
         return START_STICKY
@@ -87,7 +89,7 @@ class FloatingBubbleService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "Service onDestroy() called")
+        Log.d(TAG, "=== SERVICE DESTROY ===")
         isRunning = false
         serviceScope.cancel()
         removeBubbleView()
@@ -96,7 +98,6 @@ class FloatingBubbleService : Service() {
     }
 
     private fun createNotificationChannel() {
-        Log.d(TAG, "Creating notification channel")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -108,7 +109,6 @@ class FloatingBubbleService : Service() {
 
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
-            Log.d(TAG, "Notification channel created")
         }
     }
 
@@ -128,14 +128,25 @@ class FloatingBubbleService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("FloatMate Active")
             .setContentText("Tap to open settings")
-            .setSmallIcon(R.drawable.ic_dialog_info) // Using system icon temporarily
+            .setSmallIcon(R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
     private fun createBubbleView() {
-        Log.d(TAG, "Creating bubble view")
+        Log.d(TAG, "=== CREATING BUBBLE VIEW ===")
+
+        // Get screen dimensions for debugging
+        val displayMetrics = DisplayMetrics()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val display = windowManager.defaultDisplay
+            display.getRealMetrics(displayMetrics)
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getMetrics(displayMetrics)
+        }
+        Log.d(TAG, "Screen size: ${displayMetrics.widthPixels} x ${displayMetrics.heightPixels}")
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -151,19 +162,17 @@ class FloatingBubbleService : Service() {
             gravity = Gravity.TOP or Gravity.START
             x = sharedPrefs.bubbleX
             y = sharedPrefs.bubbleY
+            Log.d(TAG, "Initial bubble position: ($x, $y)")
         }
 
         val container = FrameLayout(this)
         val composeView = ComposeView(this).apply {
-            // Set composition strategy to prevent memory leaks
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
+            // REMOVED THE CLICKABLE FROM COMPOSE - handle all touches natively
             setContent {
                 BubbleView(
-                    onBubbleClick = {
-                        Log.d(TAG, "Bubble clicked")
-                        showExpandedView()
-                    }
+                    isDragging = isDragging
                 )
             }
         }
@@ -171,59 +180,117 @@ class FloatingBubbleService : Service() {
         container.addView(composeView)
         bubbleView = container
 
-        // Set lifecycle owner and saved state registry owner for Compose
         container.setViewTreeLifecycleOwner(overlayLifecycleOwner)
         container.setViewTreeSavedStateRegistryOwner(overlayLifecycleOwner)
 
-        // Add touch listener for dragging
-        container.setOnTouchListener { _, event ->
+        // Now the touch listener should work properly
+        container.setOnTouchListener { view, event ->
+            Log.d(TAG, "=== TOUCH EVENT: ${event.action} ===")
+            Log.d(TAG, "Raw coordinates: (${event.rawX}, ${event.rawY})")
+            Log.d(TAG, "Current bubble position: (${params.x}, ${params.y})")
+
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    Log.d(TAG, "ACTION_DOWN detected")
                     lastActionDownTime = System.currentTimeMillis()
                     initialX = params.x
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    windowManager.updateViewLayout(container, params)
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    val clickDuration = System.currentTimeMillis() - lastActionDownTime
-                    val moved = abs(event.rawX - initialTouchX) > 10 ||
-                            abs(event.rawY - initialTouchY) > 10
+                    isDragging = false
 
-                    if (clickDuration < 200 && !moved) {
-                        // It's a click
-                        Log.d(TAG, "Detected click on bubble")
-                        composeView.performClick()
-                    } else {
-                        // Save position after drag
-                        Log.d(TAG, "Bubble dragged to new position")
-                        sharedPrefs.bubbleX = params.x
-                        sharedPrefs.bubbleY = params.y
+                    // Update UI to show dragging state
+                    updateBubbleUI()
+
+                    Log.d(TAG, "Stored initial values - X: $initialX, Y: $initialY, TouchX: $initialTouchX, TouchY: $initialTouchY")
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    Log.d(TAG, "ACTION_MOVE detected")
+                    val deltaX = event.rawX - initialTouchX
+                    val deltaY = event.rawY - initialTouchY
+                    Log.d(TAG, "Delta - X: $deltaX, Y: $deltaY")
+
+                    if (!isDragging && (abs(deltaX) > 10 || abs(deltaY) > 10)) {
+                        isDragging = true
+                        Log.d(TAG, "DRAGGING STARTED!")
+                        updateBubbleUI()
+                    }
+
+                    if (isDragging) {
+                        val newX = initialX + deltaX.toInt()
+                        val newY = initialY + deltaY.toInt()
+
+                        Log.d(TAG, "Moving bubble to: ($newX, $newY)")
+
+                        params.x = newX
+                        params.y = newY
+
+                        try {
+                            windowManager.updateViewLayout(container, params)
+                            Log.d(TAG, "Layout updated successfully")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "ERROR updating layout: ${e.message}", e)
+                        }
                     }
                     true
                 }
-                else -> false
+
+                MotionEvent.ACTION_UP -> {
+                    Log.d(TAG, "ACTION_UP detected")
+                    val clickDuration = System.currentTimeMillis() - lastActionDownTime
+                    val deltaX = event.rawX - initialTouchX
+                    val deltaY = event.rawY - initialTouchY
+                    val moved = abs(deltaX) > 10 || abs(deltaY) > 10
+
+                    Log.d(TAG, "Click duration: ${clickDuration}ms, moved: $moved, isDragging: $isDragging")
+
+                    if (clickDuration < 200 && !moved && !isDragging) {
+                        Log.d(TAG, "CLICK DETECTED - showing expanded view")
+                        showExpandedView()
+                    } else if (isDragging) {
+                        Log.d(TAG, "DRAG ENDED - saving position")
+                        sharedPrefs.bubbleX = params.x
+                        sharedPrefs.bubbleY = params.y
+                        Log.d(TAG, "Position saved: (${params.x}, ${params.y})")
+                    }
+
+                    isDragging = false
+                    updateBubbleUI()
+                    true
+                }
+
+                else -> {
+                    Log.d(TAG, "OTHER touch event: ${event.action}")
+                    false
+                }
             }
         }
 
         try {
             windowManager.addView(container, params)
-            Log.d(TAG, "Bubble view added to window manager")
+            Log.d(TAG, "BUBBLE VIEW ADDED TO WINDOW MANAGER SUCCESSFULLY")
             overlayLifecycleOwner.onResume()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to add bubble view", e)
+            Log.e(TAG, "FAILED TO ADD BUBBLE VIEW", e)
+        }
+    }
+
+    private fun updateBubbleUI() {
+        // Update the Compose UI to reflect current dragging state
+        (bubbleView as? FrameLayout)?.let { container ->
+            val composeView = container.getChildAt(0) as? ComposeView
+            composeView?.setContent {
+                BubbleView(
+                    isDragging = isDragging
+                )
+            }
         }
     }
 
     private fun showExpandedView() {
-        Log.d(TAG, "Showing expanded view")
+        Log.d(TAG, "=== SHOWING EXPANDED VIEW ===")
         if (expandedView != null) {
             Log.d(TAG, "Expanded view already visible")
             return
@@ -246,7 +313,6 @@ class FloatingBubbleService : Service() {
         }
 
         val composeView = ComposeView(this).apply {
-            // Set composition strategy to prevent memory leaks
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
             setContent {
@@ -258,12 +324,9 @@ class FloatingBubbleService : Service() {
         }
 
         expandedView = composeView
-
-        // Set lifecycle owner and saved state registry owner
         composeView.setViewTreeLifecycleOwner(overlayLifecycleOwner)
         composeView.setViewTreeSavedStateRegistryOwner(overlayLifecycleOwner)
 
-        // Handle outside touches
         composeView.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_OUTSIDE) {
                 hideExpandedView()
