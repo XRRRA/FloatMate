@@ -1,7 +1,6 @@
 package com.solobolo.floatmate.navigation
 
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -10,6 +9,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.solobolo.floatmate.features.home.HomeController
 import kotlinx.serialization.Serializable
 
 sealed interface RootNavDestinations {
@@ -18,33 +18,27 @@ sealed interface RootNavDestinations {
 
     @Serializable
     data object Settings : RootNavDestinations
-
-    @Serializable
-    data object Permissions : RootNavDestinations
 }
 
 @Composable
-fun RootNavGraph() {
+fun RootNavGraph(permissionsGranted: Boolean = false) {
     val navController = rememberNavController()
-    CompositionLocalProvider(LocalRootProvider provides navController) {
+    CompositionLocalProvider(LocalRootNavigator provides navController) {
         NavHost(
             navController = navController,
             startDestination = RootNavDestinations.Home,
             modifier = Modifier.fillMaxSize()
         ) {
             composable<RootNavDestinations.Home> {
-                // HomeController()
+                HomeController(permissionsGranted = permissionsGranted)
             }
             composable<RootNavDestinations.Settings> {
-                // SettingsController()
-            }
-            composable<RootNavDestinations.Permissions> {
-                // PermissionsController()
+//                SettingsController()
             }
         }
     }
 }
 
-val LocalRootProvider = staticCompositionLocalOf<NavHostController> {
-    error("NavHostController not initialized")
+val LocalRootNavigator = staticCompositionLocalOf<NavHostController> {
+    error("NavController not initialized")
 }
