@@ -1,7 +1,10 @@
 plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.compose)
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
+    id("dagger.hilt.android.plugin")
+    id("com.google.devtools.ksp")
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
 }
 
 android {
@@ -40,20 +43,40 @@ android {
 }
 
 dependencies {
-
+    // Core Android
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+
+    // Compose BOM
     implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
-    implementation(libs.androidx.material3)
+    implementation(libs.ui)
+    implementation(libs.ui.graphics)
+    implementation(libs.ui.tooling.preview)
+    implementation(libs.material3)
+    implementation(libs.androidx.material.icons.extended)
+
+    // Navigation
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.kotlinx.serialization.json)
+
+    // Hilt
+    implementation(libs.hilt.android)
+    implementation(libs.androidx.hilt.navigation.compose)
+    ksp(libs.hilt.android.compiler)
+
+    // Coroutines
+    implementation(libs.kotlinx.coroutines.android)
+
+    // DataStore (optional)
+    implementation(libs.androidx.datastore.preferences)
+
+    // Testing
     testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.junit.v115)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.ui.test.junit4)
-    debugImplementation(libs.androidx.ui.tooling)
-    debugImplementation(libs.androidx.ui.test.manifest)
+    androidTestImplementation(libs.ui.test.junit4)
+    debugImplementation(libs.ui.tooling)
+    debugImplementation(libs.ui.test.manifest)
 }
