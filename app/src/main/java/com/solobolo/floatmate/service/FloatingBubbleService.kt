@@ -1,15 +1,24 @@
 package com.solobolo.floatmate.service
 
+//noinspection SuspiciousImport
 import android.R
 import android.animation.ValueAnimator
-import android.app.*
+import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.util.DisplayMetrics
 import android.util.Log
-import android.view.*
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import androidx.compose.ui.platform.ComposeView
@@ -25,23 +34,27 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.solobolo.floatmate.MainActivity
+import com.solobolo.floatmate.features.home.HomeViewModel
 import com.solobolo.floatmate.service.bubble.BubbleView
+import com.solobolo.floatmate.service.bubble.DeleteZoneView
 import com.solobolo.floatmate.service.bubble.ExpandedBubbleView
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import javax.inject.Inject
 import kotlin.math.abs
 
 @AndroidEntryPoint
 class FloatingBubbleService : Service() {
-
     companion object {
         const val NOTIFICATION_ID = 1001
         const val CHANNEL_ID = "floatmate_service"
         var isRunning = false
             private set
         private const val TAG = "FloatMateDrag"
-        private const val EDGE_MARGIN = 8 // dp margin from screen edge
+        private const val EDGE_MARGIN = 8
     }
 
     @Inject
@@ -50,18 +63,18 @@ class FloatingBubbleService : Service() {
     private lateinit var windowManager: WindowManager
     private var bubbleView: View? = null
     private var expandedView: ComposeView? = null
+    private var deleteZoneView: ComposeView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var screenWidth = 0
     private var screenHeight = 0
-    private var bubbleSize = 60 // dp
+    private var bubbleSize = 60
     private var edgeMarginPx = 0
+    private var deleteZoneHeight = 120
+    private var deleteButtonSize = 100
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-
-    // Custom lifecycle owner for overlay windows
     private val overlayLifecycleOwner = OverlayLifecycleOwner()
 
-    // Touch handling variables
     private var initialX = 0
     private var initialY = 0
     private var initialTouchX = 0f
@@ -69,12 +82,11 @@ class FloatingBubbleService : Service() {
     private var lastActionDownTime = 0L
     private var isDragging = false
 
-    // Animation
     private var snapAnimator: ValueAnimator? = null
+    private var isInDeleteZoneState = false
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "=== SERVICE ONCREATE CALLED ===")
         isRunning = true
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -83,7 +95,14 @@ class FloatingBubbleService : Service() {
         startForeground(NOTIFICATION_ID, createNotification())
 
         overlayLifecycleOwner.onCreate()
-        Log.d(TAG, "Service setup complete")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (bubbleView == null) {
+            createBubbleView()
+        }
+        overlayLifecycleOwner.onStart()
+        return START_STICKY
     }
 
     private fun initializeScreenDimensions() {
@@ -95,42 +114,26 @@ class FloatingBubbleService : Service() {
             @Suppress("DEPRECATION")
             windowManager.defaultDisplay.getMetrics(displayMetrics)
         }
-
         screenWidth = displayMetrics.widthPixels
         screenHeight = displayMetrics.heightPixels
-
-        // Convert dp to pixels
         val density = displayMetrics.density
         edgeMarginPx = (EDGE_MARGIN * density).toInt()
-        val bubbleSizePx = (bubbleSize * density).toInt()
-
-        Log.d(TAG, "Screen size: ${screenWidth} x ${screenHeight}")
-        Log.d(TAG, "Edge margin: ${edgeMarginPx}px, Bubble size: ${bubbleSizePx}px")
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "=== ON START COMMAND ===")
-        if (bubbleView == null) {
-            Log.d(TAG, "Creating new bubble view")
-            createBubbleView()
-        } else {
-            Log.d(TAG, "Bubble view already exists")
-        }
-        overlayLifecycleOwner.onStart()
-        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "=== SERVICE DESTROY ===")
         isRunning = false
         snapAnimator?.cancel()
         serviceScope.cancel()
         removeBubbleView()
         removeExpandedView()
         overlayLifecycleOwner.onDestroy()
+        bubbleView = null
+        expandedView = null
+        deleteZoneView = null
+        bubbleParams = null
     }
 
     private fun createNotificationChannel() {
@@ -142,7 +145,6 @@ class FloatingBubbleService : Service() {
             ).apply {
                 description = "Keeps FloatMate bubble active"
             }
-
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
         }
@@ -154,11 +156,7 @@ class FloatingBubbleService : Service() {
         }
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
-            }
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -170,9 +168,8 @@ class FloatingBubbleService : Service() {
             .build()
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun createBubbleView() {
-        Log.d(TAG, "=== CREATING BUBBLE VIEW ===")
-
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -187,7 +184,6 @@ class FloatingBubbleService : Service() {
             gravity = Gravity.TOP or Gravity.START
             x = constrainToScreenBounds(sharedPrefs.bubbleX, true)
             y = constrainToScreenBounds(sharedPrefs.bubbleY, false)
-            Log.d(TAG, "Initial bubble position: ($x, $y)")
         }
 
         bubbleParams = params
@@ -195,7 +191,6 @@ class FloatingBubbleService : Service() {
         val container = FrameLayout(this)
         val composeView = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-
             setContent {
                 BubbleView(
                     isDragging = isDragging
@@ -210,53 +205,44 @@ class FloatingBubbleService : Service() {
         container.setViewTreeSavedStateRegistryOwner(overlayLifecycleOwner)
 
         container.setOnTouchListener { view, event ->
-            Log.d(TAG, "=== TOUCH EVENT: ${event.action} ===")
-            Log.d(TAG, "Raw coordinates: (${event.rawX}, ${event.rawY})")
-            Log.d(TAG, "Current bubble position: (${params.x}, ${params.y})")
-
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    Log.d(TAG, "ACTION_DOWN detected")
-                    // Cancel any ongoing snap animation
                     snapAnimator?.cancel()
-
                     lastActionDownTime = System.currentTimeMillis()
                     initialX = params.x
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
                     isDragging = false
-
                     updateBubbleUI()
-
-                    Log.d(TAG, "Stored initial values - X: $initialX, Y: $initialY, TouchX: $initialTouchX, TouchY: $initialTouchY")
                     true
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    Log.d(TAG, "ACTION_MOVE detected")
                     val deltaX = event.rawX - initialTouchX
                     val deltaY = event.rawY - initialTouchY
-                    Log.d(TAG, "Delta - X: $deltaX, Y: $deltaY")
 
                     if (!isDragging && (abs(deltaX) > 10 || abs(deltaY) > 10)) {
                         isDragging = true
-                        Log.d(TAG, "DRAGGING STARTED!")
+                        showDeleteZone()
                         updateBubbleUI()
                     }
 
                     if (isDragging) {
                         val newX = constrainToScreenBounds(initialX + deltaX.toInt(), true)
                         val newY = constrainToScreenBounds(initialY + deltaY.toInt(), false)
-
-                        Log.d(TAG, "Moving bubble to: ($newX, $newY)")
-
                         params.x = newX
                         params.y = newY
 
+                        val wasInDeleteZone = isInDeleteZoneState
+                        isInDeleteZoneState = isInDeleteZone(newX, newY)
+
+                        if (wasInDeleteZone != isInDeleteZoneState) {
+                            updateDeleteZone()
+                        }
+
                         try {
                             windowManager.updateViewLayout(container, params)
-                            Log.d(TAG, "Layout updated successfully")
                         } catch (e: Exception) {
                             Log.e(TAG, "ERROR updating layout: ${e.message}", e)
                         }
@@ -265,29 +251,31 @@ class FloatingBubbleService : Service() {
                 }
 
                 MotionEvent.ACTION_UP -> {
-                    Log.d(TAG, "ACTION_UP detected")
                     val clickDuration = System.currentTimeMillis() - lastActionDownTime
                     val deltaX = event.rawX - initialTouchX
                     val deltaY = event.rawY - initialTouchY
                     val moved = abs(deltaX) > 10 || abs(deltaY) > 10
 
-                    Log.d(TAG, "Click duration: ${clickDuration}ms, moved: $moved, isDragging: $isDragging")
-
                     if (clickDuration < 200 && !moved && !isDragging) {
-                        Log.d(TAG, "CLICK DETECTED - showing expanded view")
                         showExpandedView()
                     } else if (isDragging) {
-                        Log.d(TAG, "DRAG ENDED - snapping to nearest edge")
-                        snapToNearestEdge()
+                        if (isInDeleteZone(params.x, params.y)) {
+                            hideDeleteZone()
+                            HomeViewModel.instance?.onBubbleDeleted()
+                            stopSelf()
+                            return@setOnTouchListener true
+                        } else {
+                            snapToNearestEdge()
+                        }
+                        hideDeleteZone()
                     }
-
                     isDragging = false
+                    isInDeleteZoneState = false
                     updateBubbleUI()
                     true
                 }
 
                 else -> {
-                    Log.d(TAG, "OTHER touch event: ${event.action}")
                     false
                 }
             }
@@ -295,7 +283,6 @@ class FloatingBubbleService : Service() {
 
         try {
             windowManager.addView(container, params)
-            Log.d(TAG, "BUBBLE VIEW ADDED TO WINDOW MANAGER SUCCESSFULLY")
             overlayLifecycleOwner.onResume()
         } catch (e: Exception) {
             Log.e(TAG, "FAILED TO ADD BUBBLE VIEW", e)
@@ -304,11 +291,9 @@ class FloatingBubbleService : Service() {
 
     private fun constrainToScreenBounds(position: Int, isX: Boolean): Int {
         return if (isX) {
-            // For X coordinate: allow from edge margin to screen width minus bubble width minus edge margin
             val bubbleWidthPx = (bubbleSize * resources.displayMetrics.density).toInt()
             position.coerceIn(edgeMarginPx, screenWidth - bubbleWidthPx - edgeMarginPx)
         } else {
-            // For Y coordinate: allow from 0 to screen height minus bubble height
             val bubbleHeightPx = (bubbleSize * resources.displayMetrics.density).toInt()
             position.coerceIn(0, screenHeight - bubbleHeightPx)
         }
@@ -319,35 +304,106 @@ class FloatingBubbleService : Service() {
             val bubbleWidthPx = (bubbleSize * resources.displayMetrics.density).toInt()
             val bubbleCenterX = params.x + bubbleWidthPx / 2
             val screenCenterX = screenWidth / 2
-
-            // Determine which edge is closer
             val targetX = if (bubbleCenterX < screenCenterX) {
-                // Snap to left edge
                 edgeMarginPx
             } else {
-                // Snap to right edge
                 screenWidth - bubbleWidthPx - edgeMarginPx
             }
-
-            Log.d(TAG, "Snapping from X=${params.x} to X=$targetX")
-
-            // Animate to the target position
             animateToPosition(params.x, targetX, params.y)
+        }
+    }
+
+    private fun isInDeleteZone(bubbleX: Int, bubbleY: Int): Boolean {
+        val bubbleWidthPx = (bubbleSize * resources.displayMetrics.density).toInt()
+        val bubbleHeightPx = (bubbleSize * resources.displayMetrics.density).toInt()
+        val deleteButtonSizePx = (deleteButtonSize * resources.displayMetrics.density).toInt()
+        val deleteZoneHeightPx = (deleteZoneHeight * resources.displayMetrics.density).toInt()
+
+        val bubbleCenterX = bubbleX + bubbleWidthPx / 2
+        val bubbleCenterY = bubbleY + bubbleHeightPx / 2
+
+        val deleteButtonCenterX = screenWidth / 2
+        val deleteButtonCenterY = screenHeight - deleteZoneHeightPx / 2
+
+        val deltaX = bubbleCenterX - deleteButtonCenterX
+        val deltaY = bubbleCenterY - deleteButtonCenterY
+        val distance = kotlin.math.sqrt((deltaX * deltaX + deltaY * deltaY).toDouble())
+        val triggerRadius = (deleteButtonSizePx / 2) * 1.5
+
+        return distance <= triggerRadius
+    }
+
+    private fun showDeleteZone() {
+        if (deleteZoneView != null) {
+            return
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                WindowManager.LayoutParams.TYPE_PHONE
+            },
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            height = (deleteZoneHeight * resources.displayMetrics.density).toInt()
+        }
+
+        val composeView = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                DeleteZoneView(
+                    isHighlighted = isInDeleteZoneState
+                )
+            }
+        }
+
+        deleteZoneView = composeView
+        composeView.setViewTreeLifecycleOwner(overlayLifecycleOwner)
+        composeView.setViewTreeSavedStateRegistryOwner(overlayLifecycleOwner)
+
+        try {
+            windowManager.addView(composeView, params)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show delete zone", e)
+        }
+    }
+
+    private fun updateDeleteZone() {
+        deleteZoneView?.setContent {
+            DeleteZoneView(
+                isHighlighted = isInDeleteZoneState
+            )
+        }
+    }
+
+    private fun hideDeleteZone() {
+        deleteZoneView?.let {
+            try {
+                windowManager.removeView(it)
+                deleteZoneView = null
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to hide delete zone", e)
+            }
         }
     }
 
     private fun animateToPosition(fromX: Int, toX: Int, y: Int) {
         snapAnimator?.cancel()
-
         snapAnimator = ValueAnimator.ofInt(fromX, toX).apply {
-            duration = 300 // Animation duration in milliseconds
+            duration = 300
             interpolator = DecelerateInterpolator()
 
             addUpdateListener { animator ->
                 val currentX = animator.animatedValue as Int
                 bubbleParams?.let { params ->
                     params.x = currentX
-                    params.y = y // Keep Y position unchanged
+                    params.y = y
 
                     try {
                         bubbleView?.let { view ->
@@ -359,16 +415,12 @@ class FloatingBubbleService : Service() {
                     }
                 }
             }
-
             doOnEnd {
-                // Save the final position
                 bubbleParams?.let { params ->
                     sharedPrefs.bubbleX = params.x
                     sharedPrefs.bubbleY = params.y
-                    Log.d(TAG, "Final position saved: (${params.x}, ${params.y})")
                 }
             }
-
             start()
         }
     }
@@ -384,10 +436,9 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun showExpandedView() {
-        Log.d(TAG, "=== SHOWING EXPANDED VIEW ===")
         if (expandedView != null) {
-            Log.d(TAG, "Expanded view already visible")
             return
         }
 
@@ -434,19 +485,16 @@ class FloatingBubbleService : Service() {
         try {
             windowManager.addView(composeView, params)
             hideBubble()
-            Log.d(TAG, "Expanded view shown")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show expanded view", e)
         }
     }
 
     private fun hideExpandedView() {
-        Log.d(TAG, "Hiding expanded view")
         expandedView?.let {
             try {
                 windowManager.removeView(it)
                 expandedView = null
-                Log.d(TAG, "Expanded view hidden")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hide expanded view", e)
             }
@@ -456,23 +504,28 @@ class FloatingBubbleService : Service() {
 
     private fun hideBubble() {
         bubbleView?.visibility = View.GONE
-        Log.d(TAG, "Bubble hidden")
     }
 
     private fun showBubble() {
         bubbleView?.visibility = View.VISIBLE
-        Log.d(TAG, "Bubble shown")
     }
 
     private fun removeBubbleView() {
-        Log.d(TAG, "Removing bubble view")
         snapAnimator?.cancel()
-        bubbleView?.let {
+        hideDeleteZone()
+
+        bubbleView?.let { view ->
             try {
-                windowManager.removeView(it)
+                (view as? FrameLayout)?.let { container ->
+                    val composeView = container.getChildAt(0) as? ComposeView
+                    composeView?.setContent { /* Empty content */ }
+                    container.removeAllViews()
+                }
+
+                windowManager.removeView(view)
                 bubbleView = null
                 bubbleParams = null
-                Log.d(TAG, "Bubble view removed")
+
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to remove bubble view", e)
             }
@@ -480,25 +533,25 @@ class FloatingBubbleService : Service() {
     }
 
     private fun removeExpandedView() {
-        Log.d(TAG, "Removing expanded view")
-        expandedView?.let {
+        expandedView?.let { view ->
             try {
-                windowManager.removeView(it)
+                view.setContent { /* Empty content */ }
+                windowManager.removeView(view)
                 expandedView = null
-                Log.d(TAG, "Expanded view removed")
+
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to remove expanded view", e)
             }
         }
     }
 
-    // Custom lifecycle owner for overlay windows
     private class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
         private val lifecycleRegistry = LifecycleRegistry(this)
         private val savedStateRegistryController = SavedStateRegistryController.create(this)
 
         override val lifecycle: Lifecycle = lifecycleRegistry
-        override val savedStateRegistry: SavedStateRegistry = savedStateRegistryController.savedStateRegistry
+        override val savedStateRegistry: SavedStateRegistry =
+            savedStateRegistryController.savedStateRegistry
 
         init {
             savedStateRegistryController.performRestore(null)

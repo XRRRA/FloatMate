@@ -384,7 +384,7 @@ private fun AppItem(
                 val info = packageManager.getApplicationInfo(packageName, 0)
                 val label = packageManager.getApplicationLabel(info).toString()
                 val icon = packageManager.getApplicationIcon(packageName)
-                appInfo = AppInfo(label, icon.toBitmap().asImageBitmap())
+                appInfo = AppInfo(label, icon.toBitmap(96, 96).asImageBitmap())
                 appExists = true
             } catch (_: Exception) {
                 appExists = false
