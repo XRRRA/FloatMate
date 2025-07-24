@@ -118,9 +118,9 @@ fun ExpandedBubbleView(
                     0 -> VolumeControlContent()
                     1 -> AppLauncherContent(
                         favoriteApps = sharedPrefs.favoriteApps,
-                        onDismiss = onDismiss
+                        onDismiss = onDismiss,
+                        sharedPrefs = sharedPrefs
                     )
-
                     2 -> NotesContent(
                         note = sharedPrefs.stickyNote,
                         onNoteChange = { sharedPrefs.stickyNote = it }

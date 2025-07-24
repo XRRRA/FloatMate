@@ -1,5 +1,7 @@
 package com.solobolo.floatmate.service
 
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -7,17 +9,31 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,19 +58,39 @@ import kotlinx.coroutines.withContext
 @Composable
 fun AppLauncherContent(
     favoriteApps: Set<String>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    sharedPrefs: FloatMateSharedPrefs
 ) {
-    val context = LocalContext.current
-    val packageManager = context.packageManager
     var showAppPicker by remember { mutableStateOf(false) }
 
     if (showAppPicker) {
-        AppPickerDialog(
+        AppPickerContent(
             currentFavorites = favoriteApps,
-            onDismiss = { showAppPicker = false },
-            onAppSelected = { /* Handle in parent */ }
+            onBack = { showAppPicker = false },
+            onAppsSelected = { selectedApps ->
+                sharedPrefs.favoriteApps = selectedApps
+                showAppPicker = false
+            }
+        )
+    } else {
+        AppLauncherGrid(
+            favoriteApps = favoriteApps,
+            onAddAppsClick = { showAppPicker = true },
+            onDismiss = onDismiss,
+            sharedPrefs = sharedPrefs
         )
     }
+}
+
+@Composable
+private fun AppLauncherGrid(
+    favoriteApps: Set<String>,
+    onAddAppsClick: () -> Unit,
+    onDismiss: () -> Unit,
+    sharedPrefs: FloatMateSharedPrefs
+) {
+    val context = LocalContext.current
+    val packageManager = context.packageManager
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -76,7 +112,13 @@ fun AppLauncherContent(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    TextButton(onClick = { showAppPicker = true }) {
+                    Button(onClick = onAddAppsClick) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text("Add Apps")
                     }
                 }
@@ -88,24 +130,157 @@ fun AppLauncherContent(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-//                items(favoriteApps.toList()) { packageName ->
-//                    AppItem(
-//                        packageName = packageName,
-//                        packageManager = packageManager,
-//                        onClick = {
-//                            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-//                            launchIntent?.let {
-//                                it.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-//                                context.startActivity(it)
-//                                onDismiss()
-//                            }
-//                        }
-//                    )
-//                }
+                items(favoriteApps.toList()) { packageName ->
+                    AppItem(
+                        packageName = packageName,
+                        packageManager = packageManager,
+                        onClick = {
+                            try {
+                                val launchIntent =
+                                    packageManager.getLaunchIntentForPackage(packageName)
+                                launchIntent?.let {
+                                    it.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    context.startActivity(it)
+                                    onDismiss()
+                                }
+                            } catch (e: Exception) {
+                                sharedPrefs.removeFavoriteApp(packageName)
+                            }
+                        }
+                    )
+                }
 
                 if (favoriteApps.size < 8) {
                     item {
-                        AddAppButton(onClick = { showAppPicker = true })
+                        AddAppButton(onClick = onAddAppsClick)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppPickerContent(
+    currentFavorites: Set<String>,
+    onBack: () -> Unit,
+    onAppsSelected: (Set<String>) -> Unit
+) {
+    val context = LocalContext.current
+    val packageManager = context.packageManager
+
+    var installedApps by remember { mutableStateOf<List<InstalledAppInfo>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var selectedApps by remember { mutableStateOf(currentFavorites.toMutableSet()) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                val apps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+                    .filter { app ->
+                        packageManager.getLaunchIntentForPackage(app.packageName) != null &&
+                                (app.flags and ApplicationInfo.FLAG_SYSTEM) == 0
+                    }
+                    .map { app ->
+                        InstalledAppInfo(
+                            packageName = app.packageName,
+                            label = packageManager.getApplicationLabel(app).toString(),
+                            icon = packageManager.getApplicationIcon(app).toBitmap().asImageBitmap()
+                        )
+                    }
+                    .sortedBy { it.label.lowercase() }
+
+                installedApps = apps
+                isLoading = false
+            } catch (e: Exception) {
+                isLoading = false
+            }
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                    Text(
+                        text = "Select Apps",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+
+                TextButton(
+                    onClick = { onAppsSelected(selectedApps) }
+                ) {
+                    Text("Done")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Selected: ${selectedApps.size}/8",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Content
+            if (isLoading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text("Loading apps...")
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(installedApps) { app ->
+                        AppPickerItem(
+                            app = app,
+                            isSelected = selectedApps.contains(app.packageName),
+                            onToggle = {
+                                if (selectedApps.contains(app.packageName)) {
+                                    selectedApps.remove(app.packageName)
+                                } else if (selectedApps.size < 8) {
+                                    selectedApps.add(app.packageName)
+                                }
+                            },
+                            canSelect = selectedApps.size < 8 || selectedApps.contains(app.packageName)
+                        )
                     }
                 }
             }
@@ -191,28 +366,61 @@ private fun AddAppButton(onClick: () -> Unit) {
 }
 
 @Composable
-private fun AppPickerDialog(
-    currentFavorites: Set<String>,
-    onDismiss: () -> Unit,
-    onAppSelected: (String) -> Unit
+private fun AppPickerItem(
+    app: InstalledAppInfo,
+    isSelected: Boolean,
+    onToggle: () -> Unit,
+    canSelect: Boolean
 ) {
-    // Implementation for app picker dialog
-    // This would show a list of installed apps to choose from
-//    AlertDialog(
-//        onDismissRequest = onDismiss,
-//        title = { Text("Select Apps") },
-//        text = {
-//            Text("App picker implementation goes here")
-//        },
-//        confirmButton = {
-//            TextButton(onClick = onDismiss) {
-//                Text("Done")
-//            }
-//        }
-//    )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = canSelect) { onToggle() },
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Image(
+                bitmap = app.icon,
+                contentDescription = app.label,
+                modifier = Modifier.size(40.dp)
+            )
+
+            Text(
+                text = app.label,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = { if (canSelect) onToggle() },
+                enabled = canSelect
+            )
+        }
+    }
 }
 
 private data class AppInfo(
+    val label: String,
+    val icon: ImageBitmap
+)
+
+private data class InstalledAppInfo(
+    val packageName: String,
     val label: String,
     val icon: ImageBitmap
 )
