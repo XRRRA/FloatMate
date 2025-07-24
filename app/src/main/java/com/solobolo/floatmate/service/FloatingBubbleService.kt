@@ -1,6 +1,7 @@
 package com.solobolo.floatmate.service
 
 import android.R
+import android.animation.ValueAnimator
 import android.app.*
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -9,9 +10,11 @@ import android.os.IBinder
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.*
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.core.animation.doOnEnd
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -38,6 +41,7 @@ class FloatingBubbleService : Service() {
         var isRunning = false
             private set
         private const val TAG = "FloatMateDrag"
+        private const val EDGE_MARGIN = 8 // dp margin from screen edge
     }
 
     @Inject
@@ -46,6 +50,11 @@ class FloatingBubbleService : Service() {
     private lateinit var windowManager: WindowManager
     private var bubbleView: View? = null
     private var expandedView: ComposeView? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+    private var screenWidth = 0
+    private var screenHeight = 0
+    private var bubbleSize = 60 // dp
+    private var edgeMarginPx = 0
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -60,17 +69,43 @@ class FloatingBubbleService : Service() {
     private var lastActionDownTime = 0L
     private var isDragging = false
 
+    // Animation
+    private var snapAnimator: ValueAnimator? = null
+
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "=== SERVICE ONCREATE CALLED ===")
         isRunning = true
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        initializeScreenDimensions()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
 
         overlayLifecycleOwner.onCreate()
         Log.d(TAG, "Service setup complete")
+    }
+
+    private fun initializeScreenDimensions() {
+        val displayMetrics = DisplayMetrics()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val display = windowManager.defaultDisplay
+            display.getRealMetrics(displayMetrics)
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getMetrics(displayMetrics)
+        }
+
+        screenWidth = displayMetrics.widthPixels
+        screenHeight = displayMetrics.heightPixels
+
+        // Convert dp to pixels
+        val density = displayMetrics.density
+        edgeMarginPx = (EDGE_MARGIN * density).toInt()
+        val bubbleSizePx = (bubbleSize * density).toInt()
+
+        Log.d(TAG, "Screen size: ${screenWidth} x ${screenHeight}")
+        Log.d(TAG, "Edge margin: ${edgeMarginPx}px, Bubble size: ${bubbleSizePx}px")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -91,6 +126,7 @@ class FloatingBubbleService : Service() {
         super.onDestroy()
         Log.d(TAG, "=== SERVICE DESTROY ===")
         isRunning = false
+        snapAnimator?.cancel()
         serviceScope.cancel()
         removeBubbleView()
         removeExpandedView()
@@ -137,17 +173,6 @@ class FloatingBubbleService : Service() {
     private fun createBubbleView() {
         Log.d(TAG, "=== CREATING BUBBLE VIEW ===")
 
-        // Get screen dimensions for debugging
-        val displayMetrics = DisplayMetrics()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val display = windowManager.defaultDisplay
-            display.getRealMetrics(displayMetrics)
-        } else {
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.getMetrics(displayMetrics)
-        }
-        Log.d(TAG, "Screen size: ${displayMetrics.widthPixels} x ${displayMetrics.heightPixels}")
-
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -160,16 +185,17 @@ class FloatingBubbleService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = sharedPrefs.bubbleX
-            y = sharedPrefs.bubbleY
+            x = constrainToScreenBounds(sharedPrefs.bubbleX, true)
+            y = constrainToScreenBounds(sharedPrefs.bubbleY, false)
             Log.d(TAG, "Initial bubble position: ($x, $y)")
         }
+
+        bubbleParams = params
 
         val container = FrameLayout(this)
         val composeView = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
-            // REMOVED THE CLICKABLE FROM COMPOSE - handle all touches natively
             setContent {
                 BubbleView(
                     isDragging = isDragging
@@ -183,7 +209,6 @@ class FloatingBubbleService : Service() {
         container.setViewTreeLifecycleOwner(overlayLifecycleOwner)
         container.setViewTreeSavedStateRegistryOwner(overlayLifecycleOwner)
 
-        // Now the touch listener should work properly
         container.setOnTouchListener { view, event ->
             Log.d(TAG, "=== TOUCH EVENT: ${event.action} ===")
             Log.d(TAG, "Raw coordinates: (${event.rawX}, ${event.rawY})")
@@ -192,6 +217,9 @@ class FloatingBubbleService : Service() {
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     Log.d(TAG, "ACTION_DOWN detected")
+                    // Cancel any ongoing snap animation
+                    snapAnimator?.cancel()
+
                     lastActionDownTime = System.currentTimeMillis()
                     initialX = params.x
                     initialY = params.y
@@ -199,7 +227,6 @@ class FloatingBubbleService : Service() {
                     initialTouchY = event.rawY
                     isDragging = false
 
-                    // Update UI to show dragging state
                     updateBubbleUI()
 
                     Log.d(TAG, "Stored initial values - X: $initialX, Y: $initialY, TouchX: $initialTouchX, TouchY: $initialTouchY")
@@ -219,8 +246,8 @@ class FloatingBubbleService : Service() {
                     }
 
                     if (isDragging) {
-                        val newX = initialX + deltaX.toInt()
-                        val newY = initialY + deltaY.toInt()
+                        val newX = constrainToScreenBounds(initialX + deltaX.toInt(), true)
+                        val newY = constrainToScreenBounds(initialY + deltaY.toInt(), false)
 
                         Log.d(TAG, "Moving bubble to: ($newX, $newY)")
 
@@ -250,10 +277,8 @@ class FloatingBubbleService : Service() {
                         Log.d(TAG, "CLICK DETECTED - showing expanded view")
                         showExpandedView()
                     } else if (isDragging) {
-                        Log.d(TAG, "DRAG ENDED - saving position")
-                        sharedPrefs.bubbleX = params.x
-                        sharedPrefs.bubbleY = params.y
-                        Log.d(TAG, "Position saved: (${params.x}, ${params.y})")
+                        Log.d(TAG, "DRAG ENDED - snapping to nearest edge")
+                        snapToNearestEdge()
                     }
 
                     isDragging = false
@@ -277,8 +302,78 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    private fun constrainToScreenBounds(position: Int, isX: Boolean): Int {
+        return if (isX) {
+            // For X coordinate: allow from edge margin to screen width minus bubble width minus edge margin
+            val bubbleWidthPx = (bubbleSize * resources.displayMetrics.density).toInt()
+            position.coerceIn(edgeMarginPx, screenWidth - bubbleWidthPx - edgeMarginPx)
+        } else {
+            // For Y coordinate: allow from 0 to screen height minus bubble height
+            val bubbleHeightPx = (bubbleSize * resources.displayMetrics.density).toInt()
+            position.coerceIn(0, screenHeight - bubbleHeightPx)
+        }
+    }
+
+    private fun snapToNearestEdge() {
+        bubbleParams?.let { params ->
+            val bubbleWidthPx = (bubbleSize * resources.displayMetrics.density).toInt()
+            val bubbleCenterX = params.x + bubbleWidthPx / 2
+            val screenCenterX = screenWidth / 2
+
+            // Determine which edge is closer
+            val targetX = if (bubbleCenterX < screenCenterX) {
+                // Snap to left edge
+                edgeMarginPx
+            } else {
+                // Snap to right edge
+                screenWidth - bubbleWidthPx - edgeMarginPx
+            }
+
+            Log.d(TAG, "Snapping from X=${params.x} to X=$targetX")
+
+            // Animate to the target position
+            animateToPosition(params.x, targetX, params.y)
+        }
+    }
+
+    private fun animateToPosition(fromX: Int, toX: Int, y: Int) {
+        snapAnimator?.cancel()
+
+        snapAnimator = ValueAnimator.ofInt(fromX, toX).apply {
+            duration = 300 // Animation duration in milliseconds
+            interpolator = DecelerateInterpolator()
+
+            addUpdateListener { animator ->
+                val currentX = animator.animatedValue as Int
+                bubbleParams?.let { params ->
+                    params.x = currentX
+                    params.y = y // Keep Y position unchanged
+
+                    try {
+                        bubbleView?.let { view ->
+                            windowManager.updateViewLayout(view, params)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "ERROR during snap animation: ${e.message}", e)
+                        cancel()
+                    }
+                }
+            }
+
+            doOnEnd {
+                // Save the final position
+                bubbleParams?.let { params ->
+                    sharedPrefs.bubbleX = params.x
+                    sharedPrefs.bubbleY = params.y
+                    Log.d(TAG, "Final position saved: (${params.x}, ${params.y})")
+                }
+            }
+
+            start()
+        }
+    }
+
     private fun updateBubbleUI() {
-        // Update the Compose UI to reflect current dragging state
         (bubbleView as? FrameLayout)?.let { container ->
             val composeView = container.getChildAt(0) as? ComposeView
             composeView?.setContent {
@@ -371,10 +466,12 @@ class FloatingBubbleService : Service() {
 
     private fun removeBubbleView() {
         Log.d(TAG, "Removing bubble view")
+        snapAnimator?.cancel()
         bubbleView?.let {
             try {
                 windowManager.removeView(it)
                 bubbleView = null
+                bubbleParams = null
                 Log.d(TAG, "Bubble view removed")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to remove bubble view", e)
