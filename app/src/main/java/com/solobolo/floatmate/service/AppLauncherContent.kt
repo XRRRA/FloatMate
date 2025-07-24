@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -33,6 +34,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,25 +63,54 @@ fun AppLauncherContent(
     onDismiss: () -> Unit,
     sharedPrefs: FloatMateSharedPrefs
 ) {
+    val context = LocalContext.current
+    val packageManager = context.packageManager
+
+    var currentFavorites by remember(favoriteApps) {
+        mutableStateOf(cleanupUninstalledApps(favoriteApps, packageManager, sharedPrefs))
+    }
     var showAppPicker by remember { mutableStateOf(false) }
 
     if (showAppPicker) {
         AppPickerContent(
-            currentFavorites = favoriteApps,
+            currentFavorites = currentFavorites,
             onBack = { showAppPicker = false },
             onAppsSelected = { selectedApps ->
-                sharedPrefs.favoriteApps = selectedApps
+                val cleanedApps = cleanupUninstalledApps(selectedApps, packageManager, sharedPrefs)
+                sharedPrefs.favoriteApps = cleanedApps
+                currentFavorites = cleanedApps
                 showAppPicker = false
             }
         )
     } else {
         AppLauncherGrid(
-            favoriteApps = favoriteApps,
+            favoriteApps = currentFavorites,
             onAddAppsClick = { showAppPicker = true },
             onDismiss = onDismiss,
             sharedPrefs = sharedPrefs
         )
     }
+}
+
+private fun cleanupUninstalledApps(
+    favoriteApps: Set<String>,
+    packageManager: PackageManager,
+    sharedPrefs: FloatMateSharedPrefs
+): Set<String> {
+    val validApps = favoriteApps.filter { packageName ->
+        try {
+            packageManager.getApplicationInfo(packageName, 0)
+            packageManager.getLaunchIntentForPackage(packageName) != null
+        } catch (_: Exception) {
+            false
+        }
+    }.toSet()
+
+    if (validApps.size != favoriteApps.size) {
+        sharedPrefs.favoriteApps = validApps
+    }
+
+    return validApps
 }
 
 @Composable
@@ -134,6 +165,10 @@ private fun AppLauncherGrid(
                     AppItem(
                         packageName = packageName,
                         packageManager = packageManager,
+                        onAppNotFound = {
+                            val updatedFavorites = favoriteApps - packageName
+                            sharedPrefs.favoriteApps = updatedFavorites
+                        },
                         onClick = {
                             try {
                                 val launchIntent =
@@ -143,7 +178,7 @@ private fun AppLauncherGrid(
                                     context.startActivity(it)
                                     onDismiss()
                                 }
-                            } catch (e: Exception) {
+                            } catch (_: Exception) {
                                 sharedPrefs.removeFavoriteApp(packageName)
                             }
                         }
@@ -154,6 +189,22 @@ private fun AppLauncherGrid(
                     item {
                         AddAppButton(onClick = onAddAppsClick)
                     }
+                }
+            }
+
+            if (favoriteApps.size >= 8) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onAddAppsClick,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Choose Other Favorites")
                 }
             }
         }
@@ -171,28 +222,42 @@ private fun AppPickerContent(
 
     var installedApps by remember { mutableStateOf<List<InstalledAppInfo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
-    var selectedApps by remember { mutableStateOf(currentFavorites.toMutableSet()) }
+    var selectedApps by remember { mutableStateOf(currentFavorites.toList()) }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
                 val apps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
                     .filter { app ->
-                        packageManager.getLaunchIntentForPackage(app.packageName) != null &&
-                                (app.flags and ApplicationInfo.FLAG_SYSTEM) == 0
+                        try {
+                            packageManager.getLaunchIntentForPackage(app.packageName) != null &&
+                                    (app.flags and ApplicationInfo.FLAG_SYSTEM) == 0
+                        } catch (_: Exception) {
+                            false
+                        }
                     }
-                    .map { app ->
-                        InstalledAppInfo(
-                            packageName = app.packageName,
-                            label = packageManager.getApplicationLabel(app).toString(),
-                            icon = packageManager.getApplicationIcon(app).toBitmap().asImageBitmap()
-                        )
+                    .mapNotNull { app ->
+                        try {
+                            InstalledAppInfo(
+                                packageName = app.packageName,
+                                label = packageManager.getApplicationLabel(app).toString(),
+                                icon = packageManager.getApplicationIcon(app).toBitmap()
+                                    .asImageBitmap()
+                            )
+                        } catch (_: Exception) {
+                            null
+                        }
                     }
                     .sortedBy { it.label.lowercase() }
 
                 installedApps = apps
+
+                selectedApps = selectedApps.filter { packageName ->
+                    apps.any { it.packageName == packageName }
+                }
+
                 isLoading = false
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 isLoading = false
             }
         }
@@ -229,7 +294,7 @@ private fun AppPickerContent(
                 }
 
                 TextButton(
-                    onClick = { onAppsSelected(selectedApps) }
+                    onClick = { onAppsSelected(selectedApps.toSet()) }
                 ) {
                     Text("Done")
                 }
@@ -237,15 +302,28 @@ private fun AppPickerContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Selected: ${selectedApps.size}/8",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Selected: ${selectedApps.size}/8",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (selectedApps.isNotEmpty()) {
+                    TextButton(
+                        onClick = { selectedApps = emptyList() }
+                    ) {
+                        Text("Clear All")
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Content
             if (isLoading) {
                 Box(
                     modifier = Modifier
@@ -273,10 +351,12 @@ private fun AppPickerContent(
                             app = app,
                             isSelected = selectedApps.contains(app.packageName),
                             onToggle = {
-                                if (selectedApps.contains(app.packageName)) {
-                                    selectedApps.remove(app.packageName)
+                                selectedApps = if (selectedApps.contains(app.packageName)) {
+                                    selectedApps.filter { it != app.packageName }
                                 } else if (selectedApps.size < 8) {
-                                    selectedApps.add(app.packageName)
+                                    selectedApps + app.packageName
+                                } else {
+                                    selectedApps
                                 }
                             },
                             canSelect = selectedApps.size < 8 || selectedApps.contains(app.packageName)
@@ -292,9 +372,11 @@ private fun AppPickerContent(
 private fun AppItem(
     packageName: String,
     packageManager: PackageManager,
+    onAppNotFound: () -> Unit = {},
     onClick: () -> Unit
 ) {
     var appInfo by remember { mutableStateOf<AppInfo?>(null) }
+    var appExists by remember { mutableStateOf(true) }
 
     LaunchedEffect(packageName) {
         withContext(Dispatchers.IO) {
@@ -303,33 +385,37 @@ private fun AppItem(
                 val label = packageManager.getApplicationLabel(info).toString()
                 val icon = packageManager.getApplicationIcon(packageName)
                 appInfo = AppInfo(label, icon.toBitmap().asImageBitmap())
-            } catch (e: Exception) {
-                // App not found
+                appExists = true
+            } catch (_: Exception) {
+                appExists = false
+                onAppNotFound()
             }
         }
     }
 
-    appInfo?.let { info ->
-        Column(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { onClick() }
-                .padding(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Image(
-                bitmap = info.icon,
-                contentDescription = info.label,
-                modifier = Modifier.size(48.dp)
-            )
-            Text(
-                text = info.label,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
+    if (appExists && appInfo != null) {
+        appInfo?.let { info ->
+            Column(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onClick() }
+                    .padding(8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Image(
+                    bitmap = info.icon,
+                    contentDescription = info.label,
+                    modifier = Modifier.size(48.dp)
+                )
+                Text(
+                    text = info.label,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+            }
         }
     }
 }
