@@ -38,6 +38,7 @@ import com.solobolo.floatmate.features.home.HomeViewModel
 import com.solobolo.floatmate.service.bubble.BubbleView
 import com.solobolo.floatmate.service.bubble.DeleteZoneView
 import com.solobolo.floatmate.service.bubble.ExpandedBubbleView
+import com.solobolo.floatmate.ui.theme.FloatMateTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -192,9 +193,11 @@ class FloatingBubbleService : Service() {
         val composeView = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
-                BubbleView(
-                    isDragging = isDragging
-                )
+                FloatMateTheme {
+                    BubbleView(
+                        isDragging = isDragging
+                    )
+                }
             }
         }
 
@@ -357,9 +360,11 @@ class FloatingBubbleService : Service() {
         val composeView = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
-                DeleteZoneView(
-                    isHighlighted = isInDeleteZoneState
-                )
+                FloatMateTheme {
+                    DeleteZoneView(
+                        isHighlighted = isInDeleteZoneState
+                    )
+                }
             }
         }
 
@@ -376,9 +381,11 @@ class FloatingBubbleService : Service() {
 
     private fun updateDeleteZone() {
         deleteZoneView?.setContent {
-            DeleteZoneView(
-                isHighlighted = isInDeleteZoneState
-            )
+            FloatMateTheme {
+                DeleteZoneView(
+                    isHighlighted = isInDeleteZoneState
+                )
+            }
         }
     }
 
@@ -429,9 +436,11 @@ class FloatingBubbleService : Service() {
         (bubbleView as? FrameLayout)?.let { container ->
             val composeView = container.getChildAt(0) as? ComposeView
             composeView?.setContent {
-                BubbleView(
-                    isDragging = isDragging
-                )
+                FloatMateTheme {
+                    BubbleView(
+                        isDragging = isDragging
+                    )
+                }
             }
         }
     }
@@ -462,10 +471,12 @@ class FloatingBubbleService : Service() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
             setContent {
-                ExpandedBubbleView(
-                    onDismiss = { hideExpandedView() },
-                    sharedPrefs = sharedPrefs
-                )
+                FloatMateTheme {
+                    ExpandedBubbleView(
+                        onDismiss = { hideExpandedView() },
+                        sharedPrefs = sharedPrefs
+                    )
+                }
             }
         }
 

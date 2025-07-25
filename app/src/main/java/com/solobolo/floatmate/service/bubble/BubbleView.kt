@@ -7,8 +7,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -20,7 +18,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import com.solobolo.floatmate.R
 
 @Composable
 fun BubbleView(
@@ -28,7 +28,7 @@ fun BubbleView(
 ) {
     // Animate scale and alpha based on dragging state
     val scale by animateFloatAsState(
-        targetValue = if (isDragging) 1.1f else 1f,
+        targetValue = if (isDragging) 1f else 0.9f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessLow
@@ -46,7 +46,7 @@ fun BubbleView(
     )
 
     val alpha by animateFloatAsState(
-        targetValue = if (isDragging) 0.9f else 1f,
+        targetValue = if (isDragging) 0.8f else 0.9f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMedium
@@ -63,19 +63,18 @@ fun BubbleView(
             .clip(CircleShape)
             .background(
                 if (isDragging) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                    MaterialTheme.colorScheme.tertiary.copy(alpha = 0.8f)
                 } else {
-                    MaterialTheme.colorScheme.primary
+                    MaterialTheme.colorScheme.tertiary
                 }
             ),
-        // REMOVED .clickable modifier - touch handling is done natively in the service
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            imageVector = Icons.Default.Widgets,
+            painter = painterResource(R.drawable.floatmate),
             contentDescription = "FloatMate",
-            tint = Color.White,
-            modifier = Modifier.size(32.dp)
+            tint = Color.Unspecified,
+            modifier = Modifier.size(64.dp)
         )
     }
 }
